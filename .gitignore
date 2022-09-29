@@ -1,0 +1,9 @@
+
+.idea/energy-water-nexus.iml
+.idea/inspectionProfiles/profiles_settings.xml
+.idea/inspectionProfiles/Project_Default.xml
+.idea/misc.xml
+.idea/modules.xml
+*.xml
+.streamlit/secrets.toml
+*.pyc
