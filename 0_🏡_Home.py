@@ -9,12 +9,10 @@ st.set_page_config(
     initial_sidebar_state="expanded",
     menu_items={
         "About": "https://github.com/northshoreio",
-        "Get help": "mailto:sam.zastrow@northshore.io"
+        "Get help": "mailto:hello@northshore.io"
     }
 )
 
 st.header("Energy Water Nexus")
 st.markdown("> *Exploring interactions between energy- and water-consumption in data centers.*")
 
-
-st.session_state

@@ -1,4 +1,5 @@
 from datetime import datetime
+from datetime import timedelta
 import requests
 import pandas as pd
 import numpy as np
@@ -131,19 +132,16 @@ def get_weather_data(unit_system: str = 'SI') -> pd.DataFrame:
     def convert_pa_to_psi(pa):
         return pa / 6_894.76
 
-    def convert_degC_to_degF(degC):
-        return (degC * 9/5) + 32
-
     def convert_kmh_to_mph(kmh):
         return kmh / 1.609
 
-    # https://dev.meteostat.net/
-    # TODO: dynamic datetime fetching
+    yesterday = datetime.now() - timedelta(days=1)
+    one_year_ago = yesterday - timedelta(days=365)
 
     weather = Hourly(
         loc=Point(lat=st.session_state.lat, lon=st.session_state.lon),
-        start=datetime(2022, 1, 1),
-        end=datetime(2022, 9, 27)
+        start=one_year_ago,
+        end=yesterday
     ).fetch()
 
     if len(weather.index) < 1:
@@ -161,23 +159,21 @@ def get_weather_data(unit_system: str = 'SI') -> pd.DataFrame:
     }, inplace=True)
     weather['air_pressure [Pa]'] = convert_hpa_to_pa(weather['air_pressure [hPa]'])
 
-    if unit_system == 'SI':
+    psychro = calculate_psychrometrics(
+        dry_bulb=weather['temperature [C]'],
+        dew_point=weather['dew_point [C]'],
+        rh=weather['relative_humidity [%]'],
+        pressure=weather['air_pressure [Pa]']
+    )
 
-        psychro = calculate_psychrometrics(
-            dry_bulb=weather['temperature [C]'],
-            dew_point=weather['dew_point [C]'],
-            rh=weather['relative_humidity [%]'],
-            pressure=weather['air_pressure [Pa]']
-        )
+    if unit_system == 'IP':
 
-    elif unit_system == 'IP':
-
-        weather['temperature [F]'] = convert_degC_to_degF(weather['temperature [C]'])
-        weather['dew_point [F]'] = convert_degC_to_degF(weather['dew_point [C]'])
+        weather['temperature [F]'] = utils.convert_degC_to_degF(weather['temperature [C]'])
+        weather['dew_point [F]'] = utils.convert_degC_to_degF(weather['dew_point [C]'])
         weather['air_pressure [psi]'] = convert_pa_to_psi(weather['air_pressure [Pa]'])
         weather['wind_speed [mph]'] = convert_kmh_to_mph(weather['wind_speed [km/h]'])
 
-        psychro = calculate_psychrometrics(
+        psychro_ip = calculate_psychrometrics(
             dry_bulb=weather['temperature [F]'],
             dew_point=weather['dew_point [F]'],
             rh=weather['relative_humidity [%]'],
@@ -185,16 +181,28 @@ def get_weather_data(unit_system: str = 'SI') -> pd.DataFrame:
             unit_system=unit_system
         )
 
-    else:
-        raise ValueError(f"`unit_system` parameter must be one of: `SI` or `IP`, not {unit_system}")
+        # because these are dimensionless units, they are duplicated between 'IP' and 'SI' calculations
+        psychro_ip.drop(
+            columns=[
+                'Psychrometrics (in): relative_humidity [%]',
+                'Psychrometrics (out): relative_humidity [%]',
+                'Psychrometrics (out): degree_of_saturation [-]'
+            ],
+            inplace=True
+        )
 
-    weather = pd.concat([weather, psychro], axis=1)
+        weather_psychro = [weather, psychro, psychro_ip]
+
+    else:
+        weather_psychro = [weather, psychro]
+
+    weather = pd.concat(weather_psychro, axis=1)
 
     st.session_state.weather_data = weather
     return weather
 
 
-def plot_weather_data():
+def plot_weather_data(unit_system: str = 'SI'):
 
     def plot_column_min_max_avg(df: pd.DataFrame, cols: list, resample_type: str = '1D'):
 
@@ -244,9 +252,12 @@ def plot_weather_data():
             st.plotly_chart(fig, use_container_width=True)
 
     df = st.session_state.weather_data.copy()
-    col_dry_bulb = [c for c in df.columns if 'Psychrometrics (in): dry_bulb' in c][0]
-    col_rh = [c for c in df.columns if 'Psychrometrics (in): relative_humidity' in c][0]
-    col_wet_bulb = [c for c in df.columns if 'Psychrometrics (out): wet_bulb' in c][0]
+
+    temp_units = '[C]' if unit_system == 'SI' else '[F]'
+
+    col_dry_bulb = f'Psychrometrics (in): dry_bulb {temp_units}'
+    col_rh = f'Psychrometrics (in): relative_humidity [%]'
+    col_wet_bulb = f'Psychrometrics (out): wet_bulb {temp_units}'
 
     fig_db_wb_contour = px.density_contour(
         df,
@@ -261,7 +272,7 @@ def plot_weather_data():
         df,
         x=col_dry_bulb,
         y=col_rh,
-        range_y=[0,100],
+        # range_y=[0, 100],
         title=f"Heat Map of Dry Bulb vs Relative Humidity",
         height=600,
     )
@@ -313,7 +324,7 @@ def __app_set_weather__():
         if isinstance(st.session_state.weather_data, pd.DataFrame):
 
             st.subheader("Weather Data")
-            plot_weather_data()
+            plot_weather_data(unit_system='SI' if st.session_state.geo['country_code'] != 'USA' else 'IP')
 
             with st.expander('View Raw Weather Data'):
                 st.dataframe(st.session_state.weather_data)
@@ -331,7 +342,7 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
     menu_items={
         "About": "https://github.com/northshoreio",
-        "Get help": "mailto:sam.zastrow@northshore.io"
+        "Get help": "mailto:hello@northshore.io"
     }
 )
 with st.sidebar:
