@@ -49,7 +49,7 @@ class WaterCooledChiller:
     baseline: pd.DataFrame = None
     proposed: pd.DataFrame = None
 
-    def simulate(self):
+    def simulate(self, do_model: str = 'both'):
 
         def __set_cooling_tower_params__(model, ct):
             model['ct_range_c'] = ct.design_range_c
@@ -59,7 +59,7 @@ class WaterCooledChiller:
             model['ct_reference_fr_water'] = ct.get_reference_water_volumetric_flowrate()
             return model
 
-        def __simulate_cooling_tower__(model, ct):
+        def __simulate_cooling_tower__(model, ct, ch):
 
             range_c = model['ct_range_c'].to_numpy()
             tws_temp_setpoint_c = model['ct_tws_temp_setpoint_c'].to_numpy()
@@ -67,16 +67,18 @@ class WaterCooledChiller:
             design_water_flowrate_m3_hr = model['ct_design_water_flowrate_m3_hr'].to_numpy()
 
             total_heat_load_kw = model['total_heat_load_kw']
-
-            # TODO: fr_water needs to vary, within reason, to heat load
-            # TODO: implement count, chillers too --> AUTOSIZE
+            # accounting for estimate of heat load from chiller compressor
+            total_heat_load_kw = total_heat_load_kw + total_heat_load_kw / ch.design_cop
 
             design_water_mass_flowrate_kg_s = \
                 (design_water_flowrate_m3_hr / 3600) * utils.STANDARD_DENSITY_OF_WATER_KG_M3
 
             # q = m * cp * dT
             required_water_flowrate_kg_s = total_heat_load_kw / (utils.SPECIFIC_HEAT_CAPACITY_OF_WATER_KJ_KGC * range_c)
-            fr_water = required_water_flowrate_kg_s / design_water_mass_flowrate_kg_s
+            fr_water = np.minimum(
+                required_water_flowrate_kg_s / design_water_mass_flowrate_kg_s * 1.1,
+                np.full_like(design_water_mass_flowrate_kg_s, fill_value=1.0)
+            )
 
             tws_temp_at_max_fan_c = np.vectorize(ct.get_tws_temp_at_max_fan)(
                 fr_water=fr_water,
@@ -107,7 +109,7 @@ class WaterCooledChiller:
                     humidity_ratio_kgh2o_kgair=self.humidity_ratio_kgh2o_kgair,
                     pressure_pa=self.pressure_pa,
                     specific_volume_moist_air=self.specific_volume_moist_air,
-                    air_flowrate_m3_hr=design_air_flowrate_m3_hr,
+                    air_flowrate_m3_hr=design_air_flowrate_m3_hr * fr_air,
                     water_flowrate_m3_s=required_water_flowrate_kg_s / utils.STANDARD_DENSITY_OF_WATER_KG_M3,
                     fr_air=fr_air
                 )
@@ -145,7 +147,7 @@ class WaterCooledChiller:
                 cw_entering_temp_c=ct_tower_water_supply_temp
             )
 
-            power_kw = np.vectorize(chiller.get_power)(
+            power_kw, eir_plr, eir_temps = np.vectorize(chiller.get_power)(
                 chw_leaving_temp_c=chw_supply_temp,
                 cw_entering_temp_c=ct_tower_water_supply_temp,
                 cooling_output_kw=heat_load_kw
@@ -155,6 +157,8 @@ class WaterCooledChiller:
 
             results = pd.DataFrame({
                 'chiller_operating_cooling_capacity [kW]': cooling_capacity_kw,
+                'chiller_electric_input_ratio_function_of_part_load_ratio [-]': eir_plr,
+                'chiller_electric_input_ratio_function_of_temperatures [-]': eir_temps,
                 'chiller_power [kW]': power_kw,
                 'chiller_coefficient_of_performance [-]': cop
             })
@@ -163,41 +167,71 @@ class WaterCooledChiller:
             return pd.concat([model, results], axis=1)
 
         def __set_performance_metrics__(model):
+            def __calculate_cumsum_water__(df) -> pd.DataFrame:
+                water_cumsum = df[[
+                    'ct_makeup_flowrate_evaporation [m^3]',
+                    'ct_makeup_flowrate_drift [m^3]',
+                    'ct_makeup_flowrate_blowdown [m^3]',
+                    'ct_makeup_flowrate_total [m^3]'
+                ]].cumsum()
+                water_cumsum.rename(
+                    columns={col: f"{col.split(' ')[0]}_cumulative {col.split(' ')[1]}" for col in
+                             water_cumsum.columns},
+                    inplace=True
+                )
+                water_cumsum.index = df.index
+                return pd.concat([df, water_cumsum], axis=1)
 
             model['total_power_consumption [kW]'] = model['it_load_kw'] + model['additional_power_kw'] + \
-                                                    model['ct_fan_power [kW]'] + model['chiller_power [kW]']
+                model['ct_fan_power [kW]'] + model['chiller_power [kW]']
+
             model['PUE [-]'] = model['total_power_consumption [kW]'] / model['it_load_kw']
-            model['WUE [L/kWh'] = (model['ct_makeup_flowrate_total [m^3]'] * 1000) / (model['it_load_kw'] * 1)
+
+            #  hourly timestep, so 1 kW = 1 kWh
+            model['WUE [L/kWh]'] = (model['ct_makeup_flowrate_total [m^3]'] * 1000) / (model['it_load_kw'] * 1)
+
+            model = __calculate_cumsum_water__(df=model)
+
+            model['Water Cost [$]'] = model['ct_makeup_flowrate_total [m^3]'] * \
+                st.session_state.water_cost_dollar_per_m3
+
+            #  hourly timestep, so 1 kW = 1 kWh
+            model['Energy Cost [$]'] = model['total_power_consumption [kW]'] * 1 * \
+                st.session_state.energy_cost_dollar_per_kwh
 
             return model
 
         common_model, self.drybulb_c, self.wetbulb_c, self.humidity_ratio_kgh2o_kgair, \
             self.pressure_pa, self.specific_volume_moist_air = build_common_model()
 
-        with st.spinner('Simulating Baseline...'):
+        if do_model == 'both' or do_model == 'baseline':
 
-            self.baseline = apply_operational_efficiencies(common_model.copy(), baseline=True)
-            ct_b = st.session_state.baseline_ct
-            ch_b = st.session_state.baseline_chiller
+            with st.spinner('Simulating Baseline...'):
 
-            self.baseline = __set_cooling_tower_params__(self.baseline, ct_b)
-            self.baseline = __simulate_cooling_tower__(self.baseline, ct_b)
-            self.baseline = __set_chiller_params__(self.baseline, ch_b)
-            self.baseline = __simulate_chiller__(self.baseline, ch_b)
+                self.baseline = apply_operational_efficiencies(common_model.copy(), baseline=True)
+                ct_b = st.session_state.baseline_ct
+                ch_b = st.session_state.baseline_chiller
 
-            self.baseline = __set_performance_metrics__(self.baseline)
+                self.baseline = __set_cooling_tower_params__(self.baseline, ct_b)
+                self.baseline = __simulate_cooling_tower__(self.baseline, ct=ct_b, ch=ch_b)
+                self.baseline = __set_chiller_params__(self.baseline, ch_b)
+                self.baseline = __simulate_chiller__(self.baseline, ch_b)
 
-        with st.spinner('Simulating Proposed...'):
+                self.baseline = __set_performance_metrics__(self.baseline)
 
-            self.proposed = apply_operational_efficiencies(common_model.copy(), baseline=False)
-            ct_p = st.session_state.proposed_ct
-            ch_p = st.session_state.proposed_chiller
+        if do_model == 'both' or do_model == 'proposed':
 
-            self.proposed = __set_cooling_tower_params__(self.proposed, ct_p)
-            self.proposed = __simulate_cooling_tower__(self.proposed, ct_p)
-            self.proposed = __set_chiller_params__(self.proposed, ch_p)
-            self.proposed = __simulate_chiller__(self.proposed, ch_p)
+            with st.spinner('Simulating Proposed...'):
 
-            self.proposed = __set_performance_metrics__(self.proposed)
+                self.proposed = apply_operational_efficiencies(common_model.copy(), baseline=False)
+                ct_p = st.session_state.proposed_ct
+                ch_p = st.session_state.proposed_chiller
+
+                self.proposed = __set_cooling_tower_params__(self.proposed, ct_p)
+                self.proposed = __simulate_cooling_tower__(self.proposed, ct=ct_p, ch=ch_p)
+                self.proposed = __set_chiller_params__(self.proposed, ch_p)
+                self.proposed = __simulate_chiller__(self.proposed, ch_p)
+
+                self.proposed = __set_performance_metrics__(self.proposed)
 
         return self.baseline, self.proposed

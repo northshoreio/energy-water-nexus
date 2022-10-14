@@ -1,10 +1,7 @@
-import pandas as pd
-import numpy as np
-from scipy.interpolate import interp1d
+import streamlit
 from scipy import optimize
 import psychrolib
-from models import functions as fn
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 import utils
 
 
@@ -38,7 +35,6 @@ class CoolingTower:
     All calculations implemented from EnergyPlus's reference documentation:
     https://bigladdersoftware.com/epx/docs/8-3/engineering-reference/cooling-towers-and-evaporative-fluid.html#variable-speed-cooling-towers-empirical-models
     """
-    count: int
     design_wetbulb_c: float
     design_approach_c: float
     design_range_c: float
@@ -46,8 +42,9 @@ class CoolingTower:
     design_air_flowrate_m3_hr: float
     design_fan_power_kw: float
     operating_tower_water_supply_temperature_c: float
+    count: int = 1
     operating_cycles_of_concentration: float = 3.5
-    operating_percent_of_water_loss_to_drift: float = 0.1
+    operating_percent_of_water_loss_to_drift: float = 0.02
     __minimum_range_c__: float = 2.7777777
     __maximum_water_flowrate_ratio__: float = 1.0
     __minimum_air_flowrate_ratio__: float = 0.2
@@ -235,9 +232,10 @@ class CoolingTower:
 
             saturated_humidity_ratio_kgh2o_kgair = psychrolib.GetSatHumRatio(TDryBulb=drybulb_c, Pressure=pressure_pa)
 
-            return (
-                           air_mass_flowrate_kg_s * (saturated_humidity_ratio_kgh2o_kgair - humidity_ratio_kgh2o_kgair)
-                   ) / utils.STANDARD_DENSITY_OF_WATER_KG_M3
+            return max(
+                air_mass_flowrate_kg_s * (saturated_humidity_ratio_kgh2o_kgair - humidity_ratio_kgh2o_kgair),
+                0
+            ) / utils.STANDARD_DENSITY_OF_WATER_KG_M3
 
         def calculate_drift():
             """
@@ -245,7 +243,10 @@ class CoolingTower:
             passing through the tower.
             :return:
             """
-            return water_flowrate_m3_s * (self.operating_percent_of_water_loss_to_drift / 100) * fr_air
+            return max(
+                water_flowrate_m3_s * (self.operating_percent_of_water_loss_to_drift / 100) * fr_air,
+                0
+            )
 
         def calculate_blowdown(flowrate_evaporation_m3_s, flowrate_drift_m3_s):
             """
@@ -276,62 +277,63 @@ class CoolingTower:
 
 @dataclass
 class Chiller:
-    count: int
+    design_cop: float
     design_cooling_capacity_kw: float
+    count: int = 1
     design_chw_supply_temperature_c: float = 5.0
     min_load_percentage: float = 0.2
     max_load_percentage: float = 1.0
-    __curve_reference_cop__: float = 5.5
+    __curve_reference_cop__: float = 6.04
     """
     EnergyPlus curve for Chiller Cooling Capacity Ratio [-] as a function of 
     Leaving Chilled Water Temperature [C] (x) and 
     Entering Condenser Water Temperature [C] (y).
-    Selected chiller: `DOE-2 Centrifugal/5.50COP`
+    Selected chiller: `Carrier 19XR 1407kW/6.04COP/VSD`
     See: https://github.com/NREL/EnergyPlus/blob/develop/datasets/Chillers.idf
     """
     __curve_cooling_capacity_ratio_function_of_temperature__: CurveBiquadratic = CurveBiquadratic(
-        constant=0.257896E+00,
-        x=0.389016E-01,
-        x2=-0.217080E-03,
-        y=0.468684E-01,
-        y2=-0.942840E-03,
-        xy=-0.343440E-03,
-        x_min=5.0,
+        constant=1.042261E+00,
+        x=2.644821E-03,
+        x2=-1.468026E-03,
+        y=1.366256E-02,
+        y2=-8.302334E-04,
+        xy=1.573579E-03,
+        x_min=4.44,
         x_max=10.0,
-        y_min=24.0,
-        y_max=35.0
+        y_min=12.78,
+        y_max=32.22
     )
     """
     EnergyPlus curve for Chiller Energy Input [W] to Cooling Output [W] Ratio [W/W] as a function of 
     Leaving Chilled Water Temperature [C] (x) and 
     Entering Condenser Water Temperature [C] (y).
-    Selected chiller: `DOE-2 Centrifugal/5.50COP`
+    Selected chiller: `Carrier 19XR 1407kW/6.04COP/VSD`
     See: https://github.com/NREL/EnergyPlus/blob/develop/datasets/Chillers.idf
     """
     __curve_energy_input_to_cooling_output_ratio_function_of_temperature__: CurveBiquadratic = CurveBiquadratic(
-        constant=0.933884E+00,
-        x=-0.582120E-01,
-        x2=0.450036E-02,
-        y=0.243000E-02,
-        y2=0.486000E-03,
-        xy=-0.121500E-02,
-        x_min=5.0,
+        constant=1.026340E+00,
+        x=-1.612819E-02,
+        x2=-1.092591E-03,
+        y=-1.784393E-02,
+        y2=7.961842E-04,
+        xy=-9.586049E-05,
+        x_min=4.44,
         x_max=10.0,
-        y_min=24.0,
-        y_max=35.0
+        y_min=12.78,
+        y_max=32.22
     )
     """
     EnergyPlus curve for Chiller Energy Input [W] to Cooling Output [W] Ratio [W/W] as a function of
     Part Load Ratio (x) [-] [load/capacity]. 
-    Selected chiller: `DOE-2 Centrifugal/5.50COP`
+    Selected chiller: `Carrier 19XR 1407kW/6.04COP/VSD`
     See: https://github.com/NREL/EnergyPlus/blob/develop/datasets/Chillers.idf
     """
     __curve_energy_input_to_cooling_output_ratio_function_of_part_load_ratio__: CurveQuadratic = CurveQuadratic(
-        constant=0.222903,
-        x=0.313387,
-        x2=0.463710,
-        x_min=0.0,
-        x_max=1.0
+        constant=1.188880E-01,
+        x=6.723542E-01,
+        x2=2.068754E-01,
+        x_min=0.2,
+        x_max=1.04
     )
 
     def __get_eir_function_of_part_load_ratio__(self, part_load_ratio):
@@ -339,9 +341,16 @@ class Chiller:
         c = self.__curve_energy_input_to_cooling_output_ratio_function_of_part_load_ratio__
 
         if part_load_ratio < c.x_min or part_load_ratio > c.x_max:
+            if part_load_ratio > c.x_max:
+                upsize = round(self.design_cooling_capacity_kw * part_load_ratio * 1.2, -2)
+                upsize_text = f" Consider up-sizing your chiller cooling capacity from " \
+                              f"{self.design_cooling_capacity_kw} [kW] to {upsize} [kW] or greater."
+                streamlit.write(upsize_text)
+            else:
+                upsize_text = ''
             raise ValueError(
                 f"Part Load Ratio out of bounds. `part_load_ratio` must be between "
-                f"({c.x_min}, {c.x_max}), but received {part_load_ratio}."
+                f"({c.x_min}, {c.x_max}), but received {part_load_ratio}.{upsize_text}"
             )
 
         return \
@@ -428,6 +437,6 @@ class Chiller:
         )
 
         energy_input_ratio = eir_function_of_part_load_ratio * eir_function_of_temperatures
-        reference_power = cooling_output_kw / self.__curve_reference_cop__
+        reference_power = cooling_output_kw / self.design_cop
 
-        return reference_power * energy_input_ratio
+        return reference_power * energy_input_ratio, eir_function_of_part_load_ratio, eir_function_of_temperatures

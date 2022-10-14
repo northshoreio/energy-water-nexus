@@ -6,10 +6,8 @@ import numpy as np
 import psychrolib
 import streamlit as st
 from meteostat import Point, Hourly
-import plotly
 import plotly.express as px
 import plotly.graph_objects as go
-from plotly.subplots import make_subplots
 import utils
 
 
@@ -204,12 +202,19 @@ def get_weather_data(unit_system: str = 'SI') -> pd.DataFrame:
 
 def plot_weather_data(unit_system: str = 'SI'):
 
-    def plot_column_min_max_avg(df: pd.DataFrame, cols: list, resample_type: str = '1D'):
+    def plot_column_min_max_avg(df: pd.DataFrame, cols: list, resample_type: str = '1d'):
 
         for col in cols:
 
+            if 'wet' in col:
+                min_fill_color = '#34004e'
+                max_fill_color = '#8d56b7'
+            else:
+                min_fill_color = '#00224E'
+                max_fill_color = '#b76856'
+
             dff = df[[col]].copy()
-            dfr = dff.resample('1d').agg(['min', 'mean', 'max'])
+            dfr = dff.resample(resample_type).agg(['min', 'mean', 'max'])
             dfr.columns = dfr.columns.map(' - '.join).str.strip(' - ')
 
             col_min = [c for c in dfr.columns if 'min' in c][0]
@@ -222,7 +227,7 @@ def plot_weather_data(unit_system: str = 'SI'):
                     x=dfr.index,
                     y=dfr[col_max],
                     mode='lines',
-                    line=dict(color='#b76856'),
+                    line=dict(color=max_fill_color),
                 ),
                 go.Scatter(
                     name='Avg',
@@ -230,16 +235,16 @@ def plot_weather_data(unit_system: str = 'SI'):
                     y=dfr[col_avg],
                     mode='lines',
                     line=dict(color='black'),
-                    fillcolor='#b76856',
+                    fillcolor=max_fill_color,
                     fill='tonexty'
                 ),
                 go.Scatter(
                     name='Min',
                     x=dfr.index,
                     y=dfr[col_min],
-                    line=dict(color='#001736'),
+                    line=dict(color=min_fill_color),
                     mode='lines',
-                    fillcolor='#00224E',
+                    fillcolor=min_fill_color,
                     fill='tonexty',
                 )
             ])
